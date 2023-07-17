@@ -1,97 +1,60 @@
-import { Bot, Context } from 'grammy';
-import axios from 'axios';
-import { Bip44, Bip44Coins, Bip39Languages, Bip39SeedGenerator, Bip39MnemonicValidator, Bip44Changes } from 'bip-utils';
-import 'dotenv/config';
+import { Bot, Context } from "grammy";
+import axios from "axios";
+import { Bip39MnemonicValidator, Bip39SeedGenerator, Bip44, Bip44Coins, Bip44Changes, Bip39Languages } from "bip-utils";
+require('dotenv').config();
 
-const bot = new Bot(process.env.API_KEY);
+const bot = new Bot(process.env.TELEGRAM_TOKEN as string);
 
-async function deriveAddress(mnemonic, coinType, accountIndex, change, addressIndex) {
-  try {
-    new Bip39MnemonicValidator(Bip39Languages.ENGLISH).Validate(mnemonic);
-    const seedBytes = new Bip39SeedGenerator(mnemonic).Generate();
-    const bipObjMst = Bip44.FromSeed(seedBytes, coinType);
-    const address = bipObjMst.Purpose().Coin().Account(accountIndex).Change(
-      change === 0 ? Bip44Changes.CHAIN_EXT : Bip44Changes.CHAIN_INT
-    ).AddressIndex(addressIndex).PublicKey().ToAddress();
-    return address;
-  } catch (err) {
-    return `Error: ${err}`;
+const networks: Record<string, any> = {
+  "ETH": Bip44Coins.ETHEREUM,
+  "BTC": Bip44Coins.BITCOIN,
+};
+
+bot.command('start', (ctx) => ctx.reply('Welcome!'));
+bot.command('help', (ctx) => ctx.reply('Help message'));
+
+bot.on('message', async (ctx: Context) => {
+  const seedPhrase: string = ctx.update.message?.text || '';
+  let totalBalance = 0;
+  let addressWithBalance: string | null = null;
+  let derivPaths: [number, number, number][] = [[0, 0, 0], [0, 0, 1], [0, 1, 0], [0, 1, 1], [1, 0, 0]];
+
+  // Validate the mnemonic
+  const mnemonicValidator = new Bip39MnemonicValidator(Bip39Languages.ENGLISH);
+  if (!mnemonicValidator.isValid(seedPhrase)) {
+    ctx.reply("Invalid mnemonic");
+    return;
   }
-}
 
-async function getBalance(address, coinType) {
-  let apiUrl = '';
-  let headers = {};
-  if (coinType === 'BTC') {
-    apiUrl = `https://api.blockchair.com/bitcoin/dashboards/address/${address}`;
-  } else {
-    apiUrl = `https://pro-openapi.debank.com/v1/user/total_balance?id=${address}`;
-    headers = {
-      'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/74.0.3729.169 Safari/537.36',
-      'AccessKey': process.env.ACCESS_KEY_DEBANK, // add your AccessKey to the .env file as ACCESS_KEY_DEBANK=your_access_key
-    };
-  }
-  try {
-    const response = await axios.get(apiUrl, { headers });
-    if (response.status === 200) {
-      return response.data;
-    }
-  } catch (err) {
-    return `Error: ${err}`;
-  }
-}
+  for (let networkKey in networks) {
+    for (let derivPath of derivPaths) {
+      const address = new Bip44(networks[networkKey], Bip44Changes.EXTERNAL, derivPath[0], derivPath[1], derivPath[2]).deriveAddress(seedPhrase, Bip39Languages.ENGLISH);
+      const apiUrl = `https://pro-openapi.debank.com/v1/user/total_balance?id=${address}`;
 
-bot.command('balance', async (ctx) => {
-  const networks = {
-    ETH: Bip44Coins.ETHEREUM,
-    BTC: Bip44Coins.BITCOIN,
-  };
-  const derivPaths = [[0, 0, 0], [0, 0, 1], [0, 1, 0], [0, 1, 1], [1, 0, 0]];
-  for (const network in networks) {
-    if (networks.hasOwnProperty(network)) {
-      const coinType = networks[network];
-      for (const path of derivPaths) {
-        const address = await deriveAddress(ctx.message.text, coinType, ...path);
-        if (address.startsWith('Error')) {
-          await ctx.reply(address);
-          return;
+      try {
+        const response = await axios.get(apiUrl);
+        const data = response.data;
+        if (data.error_code === 0 && data.data[networkKey].total_usd_value > 0) {
+          totalBalance += data.data[networkKey].total_usd_value;
+          if (!addressWithBalance) addressWithBalance = address;
         }
-        const balance = await getBalance(address, coinType);
-        if (balance > 0) {
-          await ctx.reply(`Address: ${address}\nNetwork: ${network}\nBalance: ${balance}`);
-          return;
-        }
+      } catch (error) {
+        console.error(error);
+        // Handle this error in a way that suits your needs
       }
     }
   }
-  await ctx.reply('No balance found');
-});
 
-bot.start((ctx) => ctx.reply('Welcome! Send me your mnemonic to check your balance.'));
+  if (addressWithBalance) {
+    ctx.reply(`Total Balance: ${totalBalance}, Address: ${addressWithBalance}`);
+  } else {
+    ctx.reply("No balance found for this seed phrase.");
+  }
+});
 
 bot.catch((err: any, ctx: Context) => {
-  console.error(`Error while handling update ${ctx.update.update_id}:`);
+  console.error(`Failed to process update ${ctx.update.update_id}:`);
   console.error(err);
 });
-
-// Setting the webhook directly from code
-(async () => {
-  try {
-    const response = await axios.post(
-      `https://api.telegram.org/bot${process.env.API_KEY}/setWebhook`,
-      {
-        url: process.env.TELEGRAM_WEBHOOK_URL,
-      }
-    );
-
-    if (response.data.ok) {
-      console.log("Webhook has been set successfully.");
-    } else {
-      console.log("Failed to set the webhook: ", response.data.description);
-    }
-  } catch (error) {
-    console.log("Error setting the webhook: ", error.message);
-  }
-})();
 
 bot.start();
